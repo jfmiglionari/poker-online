@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "bot": "node bot/bot.js"
   },
   "keywords": [],
   "author": "",
@@ -13,9 +15,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "pokersolver": "^2.1.4",
-    "socket.io": "^4.8.3"
-  },
-  "devDependencies": {
+    "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   }
 }
