@@ -46,6 +46,22 @@ function seatedCount() {
   return table.seats.filter(Boolean).length;
 }
 
+// Assento "ativo": ocupado e não esperando decisão de rebuy (stack zerado ao fim da
+// última mão). Assentos aguardando rebuy ficam sentados mas de fora da contagem que
+// decide se uma mão pode começar, igual um assento que acabou de sentar no meio de uma
+// mão em andamento.
+function isActiveSeat(seat) {
+  return !!seat && !seat.awaitingRebuy;
+}
+
+function activeSeatedCount() {
+  return table.seats.filter(isActiveSeat).length;
+}
+
+function nextActiveSeatedIndex(fromIndex) {
+  return findSeatIndex(fromIndex, (seat) => !seat.awaitingRebuy);
+}
+
 // Primeiro assento em sentido horário a partir de fromIndex (exclusive) que satisfaz predicate.
 // Funciona com fromIndex = -1.
 function findSeatIndex(fromIndex, predicate) {
@@ -65,14 +81,16 @@ function nextActiveIndex(fromIndex) {
   return findSeatIndex(fromIndex, (seat) => seat.inHand && !seat.folded && !seat.allIn);
 }
 
-// Lista de índices ocupados em ordem, começando em startIndex.
-function seatOrderFrom(startIndex) {
+// Lista de índices ocupados em ordem, começando em startIndex. Com onlyActive=true,
+// pula assentos aguardando rebuy (usado pra distribuir cartas só a quem participa da mão).
+function seatOrderFrom(startIndex, onlyActive = false) {
   const order = [];
   let idx = startIndex;
-  const count = seatedCount();
+  const count = onlyActive ? activeSeatedCount() : seatedCount();
+  const advance = onlyActive ? nextActiveSeatedIndex : nextSeatedIndex;
   for (let i = 0; i < count; i++) {
     order.push(idx);
-    idx = nextSeatedIndex(idx);
+    idx = advance(idx);
   }
   return order;
 }
@@ -120,16 +138,16 @@ function handleTurnTimeout(seatIndex) {
 function startHand() {
   handStartTimer = null;
 
-  if (seatedCount() < 2) {
+  if (activeSeatedCount() < 2) {
     table.status = 'standby';
     return;
   }
 
   table.status = 'playing';
-  table.dealerIndex = nextSeatedIndex(table.dealerIndex);
+  table.dealerIndex = nextActiveSeatedIndex(table.dealerIndex);
 
   for (const seat of table.seats) {
-    if (!seat) continue;
+    if (!isActiveSeat(seat)) continue; // aguardando rebuy: fica de fora desta mão
     seat.inHand = true;
     seat.folded = false;
     seat.allIn = false;
@@ -140,14 +158,14 @@ function startHand() {
     seat.totalContributed = 0; // pro cálculo de side pots no showdown
   }
 
-  const isHeadsUp = seatedCount() === 2;
+  const isHeadsUp = activeSeatedCount() === 2;
   if (isHeadsUp) {
     // Heads-up: dealer é o small blind e age primeiro no pré-flop.
     table.sbIndex = table.dealerIndex;
-    table.bbIndex = nextSeatedIndex(table.sbIndex);
+    table.bbIndex = nextActiveSeatedIndex(table.sbIndex);
   } else {
-    table.sbIndex = nextSeatedIndex(table.dealerIndex);
-    table.bbIndex = nextSeatedIndex(table.sbIndex);
+    table.sbIndex = nextActiveSeatedIndex(table.dealerIndex);
+    table.bbIndex = nextActiveSeatedIndex(table.sbIndex);
   }
   table.pot = 0;
 
@@ -156,7 +174,7 @@ function startHand() {
   table.minRaise = BIG_BLIND;
 
   table.deck = shuffle(createDeck());
-  const order = seatOrderFrom(table.sbIndex);
+  const order = seatOrderFrom(table.sbIndex, true);
   for (let round = 0; round < 2; round++) {
     for (const idx of order) {
       table.seats[idx].holeCards.push(table.deck.pop());
@@ -165,7 +183,7 @@ function startHand() {
 
   table.communityCards = [];
   table.phase = 'preflop';
-  table.currentTurnIndex = isHeadsUp ? table.dealerIndex : nextSeatedIndex(table.bbIndex);
+  table.currentTurnIndex = isHeadsUp ? table.dealerIndex : nextActiveSeatedIndex(table.bbIndex);
   startTurnTimer();
 
   broadcastState();
@@ -173,7 +191,7 @@ function startHand() {
 
 function scheduleHandStart() {
   if (table.status !== 'standby') return;
-  if (seatedCount() < 2) return;
+  if (activeSeatedCount() < 2) return;
   if (handStartTimer) return;
   handStartTimer = setTimeout(startHand, HAND_START_DELAY_MS);
 }
@@ -274,6 +292,13 @@ function endHand() {
     seat.hasActedThisRound = false;
     seat.revealAtShowdown = false;
     seat.totalContributed = 0;
+
+    // Stack zerado ao fim da mão: oferece rebuy só pro dono do assento (nunca io.emit).
+    // Fica de fora da contagem de ativos (ver activeSeatedCount) até aceitar ou recusar.
+    if (seat.stack === 0 && !seat.awaitingRebuy) {
+      seat.awaitingRebuy = true;
+      io.to(seat.socketId).emit('rebuy-offer', { seatIndex: idx, defaultBuyin: DEFAULT_BUYIN });
+    }
   }
   scheduleHandStart();
 }
@@ -484,6 +509,7 @@ function publicSeat(seat, forSocketId) {
     currentBet: seat.currentBet,
     isMe,
     connected: seat.connected,
+    awaitingRebuy: !!seat.awaitingRebuy,
     holeCards: showCards ? seat.holeCards : seat.holeCards.map(() => null),
   };
 }
@@ -517,7 +543,7 @@ function clearSeat(idx) {
   const seat = table.seats[idx];
   if (seat && seat.disconnectGraceTimer) clearTimeout(seat.disconnectGraceTimer);
   table.seats[idx] = null;
-  if (seatedCount() < 2) table.status = 'standby';
+  if (activeSeatedCount() < 2) table.status = 'standby';
 }
 
 // Levantar da mesa (voluntário, "leave"): só entre mãos.
@@ -593,6 +619,7 @@ io.on('connection', (socket) => {
       connected: true,
       disconnectGraceTimer: null,
       pendingRemoval: false,
+      awaitingRebuy: false,
     };
     broadcastState();
     scheduleHandStart();
@@ -608,6 +635,25 @@ io.on('connection', (socket) => {
     if (!seat.inHand || seat.folded || seat.allIn) return;
 
     processPlayerAction(idx, type, amount);
+  });
+
+  // Resposta ao rebuy-offer (item de rebuy): só vale enquanto o assento está mesmo
+  // aguardando rebuy. Aceitar credita o buy-in padrão de novo e libera pra próxima mão;
+  // recusar libera o assento (mesma lógica de quem levanta da mesa).
+  socket.on('rebuy-response', ({ accept }) => {
+    const idx = table.seats.findIndex((s) => s && s.socketId === socket.id);
+    if (idx === -1) return;
+    const seat = table.seats[idx];
+    if (!seat.awaitingRebuy) return;
+
+    if (accept) {
+      seat.stack += DEFAULT_BUYIN;
+      seat.awaitingRebuy = false;
+      scheduleHandStart();
+    } else {
+      clearSeat(idx);
+    }
+    broadcastState();
   });
 
   socket.on('leave', () => {

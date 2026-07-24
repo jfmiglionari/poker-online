@@ -23,10 +23,13 @@ const potEl = document.getElementById('pot');
 const communityCardsEl = document.getElementById('community-cards');
 const actionPanelEl = document.getElementById('action-panel');
 const handResultEl = document.getElementById('hand-result');
+const rebuyModalEl = document.getElementById('rebuy-modal');
+const rebuyModalBodyEl = document.getElementById('rebuy-modal-body');
 
 let mySeatIndex = null;
 let lastHandResult = null;
 let lastState = null;
+let rebuyOfferAmount = null;
 
 function seatPosition(index) {
   // distribui os assentos ao redor da elipse da mesa
@@ -112,6 +115,8 @@ function render(state) {
       if (seat.folded) badges.push('<span class="badge folded">FOLD</span>');
       if (seat.allIn) badges.push('<span class="badge allin">ALL-IN</span>');
       if (seat.connected === false) badges.push('<span class="badge disconnected">RECONECTANDO</span>');
+      if (seat.awaitingRebuy) badges.push('<span class="badge rebuy">SEM FICHAS</span>');
+      else if (state.status === 'playing' && !seat.inHand) badges.push('<span class="badge waiting">AGUARDANDO PRÓXIMA MÃO</span>');
 
       div.innerHTML = `
         <div class="badges">${badges.join('')}</div>
@@ -161,7 +166,28 @@ function render(state) {
   }
 
   renderActionPanel(state);
+  renderRebuyModal(state);
 }
+
+// Modal de rebuy (não window.confirm): só aparece pro próprio jogador cujo assento está
+// aguardando rebuy. Os demais só veem o badge "SEM FICHAS" nesse assento (renderizado acima).
+function renderRebuyModal(state) {
+  const mySeat = mySeatIndex !== null ? state.seats[mySeatIndex] : null;
+  if (mySeat && mySeat.awaitingRebuy) {
+    const amount = rebuyOfferAmount !== null ? rebuyOfferAmount : 'mais';
+    rebuyModalBodyEl.textContent = `Adicionar ${amount} fichas e continuar jogando, ou levantar da mesa?`;
+    rebuyModalEl.style.display = 'flex';
+  } else {
+    rebuyModalEl.style.display = 'none';
+  }
+}
+
+document.getElementById('rebuy-accept').onclick = () => {
+  socket.emit('rebuy-response', { accept: true });
+};
+document.getElementById('rebuy-decline').onclick = () => {
+  socket.emit('rebuy-response', { accept: false });
+};
 
 function isMyTurn(state) {
   return mySeatIndex !== null && state.currentTurnIndex === mySeatIndex;
@@ -258,4 +284,7 @@ setInterval(updateTurnTimers, 250);
 socket.on('state', render);
 socket.on('hand-result', (result) => {
   lastHandResult = result;
+});
+socket.on('rebuy-offer', ({ defaultBuyin }) => {
+  rebuyOfferAmount = defaultBuyin;
 });

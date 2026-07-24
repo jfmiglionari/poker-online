@@ -276,6 +276,83 @@ body {
   font-size: 9px;
 }
 
+.badge.rebuy {
+  background: #b71c1c;
+  color: #fff;
+  width: auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 9px;
+}
+
+.badge.waiting {
+  background: #37474f;
+  color: #fff;
+  width: auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 9px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-box {
+  background: #1b1b1b;
+  border: 2px solid #ffd700;
+  border-radius: 14px;
+  padding: 22px 28px;
+  max-width: 320px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  animation: popIn 0.2s ease-out;
+}
+
+.modal-title {
+  font-size: 17px;
+  font-weight: 800;
+  color: #ffd700;
+  margin-bottom: 10px;
+}
+
+.modal-body {
+  font-size: 13px;
+  color: #fff;
+  margin-bottom: 18px;
+  line-height: 1.4;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.modal-actions button {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+#rebuy-accept {
+  background: #2e7d32;
+  color: #fff;
+}
+
+#rebuy-decline {
+  background: #555;
+  color: #fff;
+}
+
 .seat.turn {
   border-color: #ffd700;
   box-shadow: 0 0 14px #ffd700;

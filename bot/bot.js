@@ -36,6 +36,15 @@ socket.on('hand-result', (result) => {
   console.log(`[${BOT_NAME}] mão encerrada: ${summary}`);
 });
 
+// Sem isso o bot fica travado pra sempre no assento assim que o stack zera (nunca
+// responde ao rebuy-offer). Sempre aceita, igual um jogador que quer continuar jogando.
+socket.on('rebuy-offer', ({ defaultBuyin }) => {
+  console.log(`[${BOT_NAME}] recebeu rebuy-offer (+${defaultBuyin}), aceitando...`);
+  setTimeout(() => {
+    socket.emit('rebuy-response', { accept: true });
+  }, 800 + Math.random() * 800);
+});
+
 socket.on('state', (state) => {
   latestState = state;
 
@@ -89,45 +98,71 @@ function cardRankIndex(card) {
 }
 
 // Sem pokersolver pré-flop (só 2 cartas): heurística simples por par/altura/naipe/conectividade.
+// Propositalmente inflada (jogador amador supervaloriza qualquer par, suited e "tem um Ás") —
+// um jogador sólido jogaria um leque bem mais estreito que este.
 function estimatePreflopStrength(holeCards) {
   const [a, b] = holeCards;
   const rA = cardRankIndex(a);
   const rB = cardRankIndex(b);
 
-  if (rA === rB) return 0.5 + (rA / 12) * 0.5; // par: 0.5 (22) a 1.0 (AA)
+  if (rA === rB) return Math.min(0.55 + (rA / 12) * 0.45, 0.97); // "par é par": piso alto até no 22
 
   const high = Math.max(rA, rB);
   const low = Math.min(rA, rB);
   let strength = (high / 12) * 0.35 + (low / 12) * 0.15;
-  if (a[1] === b[1]) strength += 0.06; // suited
+  if (a[1] === b[1]) strength += 0.09; // suited empolga mais do que devia
   const gap = high - low;
-  if (gap === 1) strength += 0.05;
-  else if (gap === 2) strength += 0.02;
+  if (gap === 1) strength += 0.06;
+  else if (gap === 2) strength += 0.03;
+  if (high === 12) strength += 0.05; // "tenho um Ás" sempre parece jogável
   return Math.min(strength, 0.95);
 }
 
 // 0..1, usando pokersolver a partir do flop em diante (já dá pra formar 5 cartas).
+// Amador supervaloriza par no topo/overpair — acha que "fiz um par" já é motivo pra
+// segurar a mão até o showdown, então a força aqui é inflada nesses casos.
 function estimateStrength(seat, state) {
   const holeCards = seat.holeCards.filter(Boolean);
   if (holeCards.length < 2) return 0.3;
   if (state.communityCards.length === 0) return estimatePreflopStrength(holeCards);
 
   const solved = Hand.solve([...holeCards, ...state.communityCards]);
-  return Math.min(solved.rank / 9, 1);
+  let strength = Math.min(solved.rank / 9, 1);
+
+  if (solved.name === 'Pair' || solved.name === 'Two Pair') {
+    const boardRanks = state.communityCards.map(cardRankIndex);
+    const topBoardRank = Math.max(...boardRanks);
+    const holeRanks = holeCards.map(cardRankIndex);
+    const madeTopPairOrBetter = holeRanks.some((r) => r >= topBoardRank);
+    const madeOverpair = holeRanks[0] === holeRanks[1] && holeRanks[0] > topBoardRank;
+    if (madeTopPairOrBetter || madeOverpair) strength = Math.min(strength + 0.25, 0.85);
+  }
+
+  return strength;
 }
 
-// Sobe pra um total "redondo" em BB acima da maior aposta, respeitando o mínimo de raise
-// e o teto do stack (all-in). Retorna null se o stack só dá pra pagar all-in (não sobra
-// margem pra configurar um raise de verdade).
-function computeRaiseTotal(state, me, highest) {
+// Sobe pra um total em BB acima da maior aposta, respeitando o mínimo de raise e o teto
+// do stack (all-in). Retorna null se o stack só dá pra pagar all-in (não sobra margem
+// pra configurar um raise de verdade).
+function computeRaiseTotal(state, me, highest, sizeBB) {
   const bb = state.bigBlind;
   const minTotal = highest + state.minRaise;
   const maxTotal = me.currentBet + me.stack;
   if (minTotal > maxTotal) return null;
 
-  const sizeBB = 2 + Math.floor(Math.random() * 4); // 2 a 5 BB acima da maior aposta
-  const desired = highest + sizeBB * bb;
+  const desired = Math.round(highest + sizeBB * bb);
   return Math.min(Math.max(desired, minTotal), maxTotal);
+}
+
+// Amador não é consistente no tamanho da aposta: o "normal" acompanha um pouco a força
+// da mão, mas de vez em quando inverte — sub-aposta com mão forte (medo de espantar o
+// adversário) ou sobre-aposta com mão média (tentando parecer mais forte do que é).
+function pickBetSizeBB(strength) {
+  if (Math.random() < 0.3) {
+    return strength > 0.75 ? 1 + Math.random() * 1.5 : 6 + Math.random() * 4;
+  }
+  const base = strength > 0.75 ? 4 : strength > 0.5 ? 2.5 : 2;
+  return base + Math.random() * 2;
 }
 
 function send(type, amount) {
@@ -140,10 +175,15 @@ function act(state, idx) {
   const highest = Math.max(0, ...state.seats.filter(Boolean).map((s) => s.currentBet));
   const toCall = highest - me.currentBet;
   const strength = estimateStrength(me, state);
+  const isPreflop = state.communityCards.length === 0;
+  const bb = state.bigBlind;
 
   if (toCall <= 0) {
-    const wantsToBet = strength > 0.72 && Math.random() < 0.55;
-    const raiseTotal = wantsToBet ? computeRaiseTotal(state, me, highest) : null;
+    // Blefe ocasional e desbalanceado: de vez em quando aposta com mão fraca sem
+    // nenhuma leitura da mesa por trás — não é um blefe "pensado", é variância de amador.
+    const unbalancedBluff = strength < 0.3 && Math.random() < 0.07;
+    const wantsToBet = unbalancedBluff || (strength > 0.68 && Math.random() < 0.5);
+    const raiseTotal = wantsToBet ? computeRaiseTotal(state, me, highest, pickBetSizeBB(strength)) : null;
     if (raiseTotal !== null) send(highest === 0 ? 'bet' : 'raise', raiseTotal);
     else send('check');
     return;
@@ -151,20 +191,36 @@ function act(state, idx) {
 
   const potOdds = toCall / (state.pot + toCall);
 
-  if (strength < 0.16 && Math.random() < 0.75) {
+  // Leque pré-flop mais largo que o ideal: paga raise pequeno com mão fraca com mais
+  // frequência do que um jogador sólido pagaria.
+  if (isPreflop && strength < 0.22) {
+    const raiseSizeBB = toCall / bb;
+    const foldChance = raiseSizeBB <= 3 ? 0.4 : 0.78;
+    if (Math.random() < foldChance) {
+      send('fold');
+      return;
+    }
+  } else if (!isPreflop && strength < 0.16 && Math.random() < 0.7) {
     send('fold');
     return;
   }
 
-  if (strength > 0.8 && Math.random() < 0.4) {
-    const raiseTotal = computeRaiseTotal(state, me, highest);
+  // Poucos 3-bets/re-raises: mesmo com mão muito forte, prefere só pagar em vez de
+  // reabrir a aposta quando já há aposta/raise na sua frente.
+  if (strength > 0.8 && Math.random() < 0.2) {
+    const raiseTotal = computeRaiseTotal(state, me, highest, pickBetSizeBB(strength));
     if (raiseTotal !== null) {
       send('raise', raiseTotal);
       return;
     }
   }
 
-  if (strength < potOdds + 0.05 && Math.random() < 0.5) {
+  // Perto do showdown (river), tende a pagar por curiosidade em vez de foldar pra
+  // agressão óbvia — a disciplina de pot odds cai bastante.
+  const isRiver = state.phase === 'river';
+  const foldMargin = isRiver ? -0.12 : 0.05;
+  const foldProbability = isRiver ? 0.25 : 0.5;
+  if (strength < potOdds + foldMargin && Math.random() < foldProbability) {
     send('fold');
     return;
   }

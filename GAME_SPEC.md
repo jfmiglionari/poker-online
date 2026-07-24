@@ -23,13 +23,26 @@ standby/ready conforme número de jogadores sentados (`server.js`,
   (constantes `SMALL_BLIND` / `BIG_BLIND`).
 - **Stack persiste entre mãos** — nunca reseta automaticamente. Fichas
   ganhas ficam, fichas perdidas saem, e assim segue mão após mão.
-- **Rebuy (recompra) entre mãos**: se o stack do jogador cair abaixo do
-  buy-in padrão (ou chegar a 0), ele pode adicionar mais fichas — só
-  enquanto **não está em uma mão em andamento** (entre o fim de uma mão e
-  o início da próxima). Nunca é permitido adicionar fichas no meio de uma
-  rodada de apostas. Sugestão de UI: botão "Add chips" que abre um input
-  (em BB ou fichas), habilitado só quando `phase` não está ativa pro
-  jogador.
+- **Rebuy (recompra) entre mãos**: quando o stack do jogador chega a 0 ao
+  fim de uma mão (em `endHand()`), o servidor marca o assento com
+  `awaitingRebuy: true` e manda um evento **privado**, só pro socket
+  daquele jogador (`socket.emit`/`io.to(socketId).emit('rebuy-offer', ...)`,
+  nunca `io.emit`), oferecendo rebuy. Os demais jogadores nunca recebem
+  esse popup — eles só veem esse assento com um badge público (ex: "SEM
+  FICHAS"), já que `awaitingRebuy` faz parte do estado público da mesa.
+  O cliente responde com `rebuy-response` (`{accept: true|false}`):
+  - **Aceitar**: credita `DEFAULT_BUYIN` de novo no stack e limpa
+    `awaitingRebuy` — o jogador volta a ser contado como ativo a partir da
+    próxima mão, igual quem acabou de sentar.
+  - **Recusar**: libera o assento (mesma lógica de levantar da mesa/
+    `clearSeat`).
+  Assentos com `awaitingRebuy: true` ficam de fora da contagem de
+  "jogadores ativos" usada por `startHand()`/`scheduleHandStart()` para
+  decidir se uma mão pode começar — se isso deixar menos de 2 jogadores
+  ativos na mesa, ela permanece (ou volta) em `standby` até a decisão do
+  rebuy ser resolvida (aceitar ou recusar), nunca tentando iniciar mão com
+  só 1 jogador ativo. Nunca é permitido adicionar fichas no meio de uma
+  rodada de apostas — a oferta de rebuy só existe entre mãos.
 - Botão de dealer rotaciona a cada mão entre os jogadores sentados.
 - Texas Hold'em completo: pré-flop, flop, turn, river, showdown.
 - Ações: fold, check, call, bet, raise, all-in.
@@ -47,10 +60,12 @@ standby/ready conforme número de jogadores sentados (`server.js`,
 - Jogador pode "levantar da mesa" (stand up) — só entre mãos, nunca no meio
   de uma mão em andamento.
 - Se o stack de um jogador chegar a 0 ao fim de uma mão, ele fica marcado
-  como "sentado, sem fichas" (`stack: 0`) e não participa das próximas mãos
-  até fazer rebuy. Só é removido do assento se ele mesmo escolher levantar.
-- Quando sobrar só 1 jogador sentado (ou só jogadores com stack 0), mesa
-  volta pro estado standby.
+  como "sentado, sem fichas" (`awaitingRebuy: true`, `stack: 0`) e não
+  participa das próximas mãos até responder a oferta de rebuy (ver seção
+  de rebuy acima). Só é removido do assento se ele mesmo recusar o rebuy
+  ou escolher levantar.
+- Quando sobrar menos de 2 jogadores ativos sentados (contando só quem não
+  está `awaitingRebuy`), mesa volta pro estado standby.
 
 ## Escopo do MVP — o que FICA DE FORA (não implementar agora)
 
@@ -68,12 +83,21 @@ standby/ready conforme número de jogadores sentados (`server.js`,
   fase da mão). Nunca envia ao cliente cartas de outros jogadores nem o resto
   do baralho.
 - Eventos Socket.io sugeridos:
-  - Cliente → servidor: `sit`, `leave`, `action` (`{type: 'fold'|'check'|'call'|'bet'|'raise', amount?}`)
+  - Cliente → servidor: `sit`, `leave`, `action` (`{type: 'fold'|'check'|'call'|'bet'|'raise', amount?}`),
+    `rebuy-response` (`{accept: boolean}`).
   - Servidor → cliente: `state` (estado público da mesa + só as cartas do
     próprio jogador), `your-turn` (com prazo do timer), `hand-result`
-    (vencedor(es), mãos reveladas no showdown, valor ganho).
+    (vencedor(es), mãos reveladas no showdown, valor ganho), `rebuy-offer`
+    (evento privado, só pro socket do jogador com stack zerado).
 - Frontend só renderiza o que recebe; nenhuma lógica de regra de poker no
   cliente.
+- `bot/bot.js`: bot de teste (conecta como jogador real via Socket.io) só
+  pra ter alguém pra jogar contra durante o desenvolvimento — não faz
+  parte do produto. Calibrado propositalmente pra parecer um jogador
+  amador com ~3 anos de experiência (leque pré-flop mais largo que o
+  ideal, supervaloriza par feito/overpair, paga demais no showdown, poucos
+  3-bets, sizing inconsistente, blefes ocasionais desbalanceados) — não é
+  um solver nem uma decisão puramente aleatória.
 
 ## Modelo de dados sugerido (estado da mesa)
 
@@ -153,6 +177,13 @@ desempates (kicker, straight com Ás baixo, etc). Usar a biblioteca npm
 - Jogador tenta sentar em assento já ocupado ou sentar em dois lugares:
   servidor rejeita.
 - Mesa com apenas 1 jogador: volta pro status `standby`, sem iniciar mão.
+- Jogador senta durante uma mão em andamento (3º+ jogador entrando com
+  outros dois já jogando): `sit()` sempre cria o assento com
+  `inHand: false`, e `startHand()` só marca `inHand: true` pra todo mundo
+  no início da mão seguinte — então quem senta no meio de uma mão fica de
+  fora automaticamente (sem cartas, sem participar da rodada de apostas)
+  até a próxima mão começar, sem precisar de nenhum tratamento especial
+  além do badge de UI (ver seção UI/UX).
 
 ## UI/UX mínima
 
@@ -166,6 +197,14 @@ desempates (kicker, straight com Ás baixo, etc). Usar a biblioteca npm
 - Ao final da mão, mostrar brevemente as cartas reveladas e o vencedor
   antes de limpar a mesa pra próxima (overlay "WIN" com o valor ganho,
   similar ao exemplo de referência abaixo).
+- Assento com `awaitingRebuy: true` (stack zerado, esperando decisão de
+  rebuy): badge público "SEM FICHAS" visível pra todos os jogadores. Só o
+  próprio dono do assento recebe um modal (não `window.confirm`) com as
+  opções "Fazer rebuy" / "Levantar da mesa", disparado pelo evento privado
+  `rebuy-offer`.
+- Assento sentado mas ainda de fora da mão em andamento (`status ===
+  'playing'` e `inHand: false`, caso de quem sentou no meio de uma mão):
+  badge "AGUARDANDO PRÓXIMA MÃO" nesse assento.
 
 ### Referência visual (mesa real de poker online)
 
