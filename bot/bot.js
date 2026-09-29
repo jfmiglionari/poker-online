@@ -5,13 +5,34 @@
 // Uso: node bot/bot.js ["Nome do bot"] [seatIndex]
 //   BOT_SERVER_URL=http://localhost:3000 node bot/bot.js
 
+require('dotenv').config();
 const { io } = require('socket.io-client');
 const { Hand } = require('pokersolver');
+const Anthropic = require('@anthropic-ai/sdk');
+const { z } = require('zod');
+const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 
 const SERVER_URL = process.env.BOT_SERVER_URL || 'http://localhost:3000';
 const BOT_NAME = process.argv[2] || 'Bot';
 const REQUESTED_SEAT = process.argv[3] !== undefined ? Number(process.argv[3]) : null;
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
+
+// Modo IA (opt-in): BOT_AI=1 node bot/bot.js "Bot IA" — decide a ação chamando a API da
+// Anthropic em vez da heurística. Sem BOT_AI ou sem ANTHROPIC_API_KEY, o bot roda 100%
+// heurístico como antes.
+const AI_MODE_REQUESTED = process.env.BOT_AI === '1';
+const AI_MODEL = 'claude-haiku-4-5';
+const AI_TIMEOUT_MS = 6000; // bem abaixo do TURN_TIMEOUT_MS (20s) do servidor
+const anthropic = AI_MODE_REQUESTED && process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+if (AI_MODE_REQUESTED && !anthropic) {
+  console.warn(`[${BOT_NAME}] BOT_AI=1 mas ANTHROPIC_API_KEY não está definido — rodando no modo heurístico.`);
+}
+
+const ActionDecisionSchema = z.object({
+  action: z.enum(['fold', 'check', 'call', 'bet', 'raise']),
+  amount: z.number().optional(),
+  reasoning: z.string(),
+});
 
 // Id persistido "fake" — só precisa ser único por bot pra ele poder reconectar
 // no mesmo assento se cair (mesmo mecanismo do client.js/localStorage).
@@ -86,11 +107,89 @@ function trySit(state) {
   }, 1000);
 }
 
-function actIfStillMyTurn(idx) {
+async function actIfStillMyTurn(idx) {
   const state = latestState;
   if (!state) return;
   if (state.status !== 'playing' || state.currentTurnIndex !== idx) return; // já não é mais a vez dele
-  act(state, idx);
+
+  if (anthropic) {
+    const decidedByAI = await decideActionWithAI(state, idx);
+    if (decidedByAI) return;
+  }
+
+  // Sem IA, ou a IA falhou/demorou/sugeriu algo inválido: cai pra heurística — o bot
+  // nunca fica sem agir.
+  act(latestState, idx);
+}
+
+// Monta uma descrição compacta do estado e pede a decisão pra API da Anthropic, validando
+// a resposta contra as ações legais antes de mandar pro servidor. Retorna true se mandou
+// uma ação (a chamou), false se deve cair pra heurística (falha, timeout ou ação inválida).
+async function decideActionWithAI(state, idx) {
+  const me = state.seats[idx];
+  const highest = Math.max(0, ...state.seats.filter(Boolean).map((s) => s.currentBet));
+  const toCall = highest - me.currentBet;
+  const minTotal = highest + state.minRaise;
+  const maxTotal = me.currentBet + me.stack;
+  const canCheck = toCall <= 0;
+  const canRaise = maxTotal > highest;
+
+  const situacao = {
+    fase: state.phase,
+    minhasCartas: me.holeCards.filter(Boolean),
+    cartasComunitarias: state.communityCards,
+    poteTotal: state.pot,
+    meuStack: me.stack,
+    quantoFaltaPagar: toCall,
+    bigBlind: state.bigBlind,
+    totalMinimoParaBetOuRaise: canRaise ? minTotal : null,
+    totalMaximoParaBetOuRaise: canRaise ? maxTotal : null,
+    acoesLegaisAgora: ['fold', canCheck ? 'check' : 'call', ...(canRaise ? [highest === 0 ? 'bet' : 'raise'] : [])],
+  };
+
+  try {
+    const response = await anthropic.messages.parse(
+      {
+        model: AI_MODEL,
+        max_tokens: 512,
+        system:
+          "Você está jogando uma mão de Texas Hold'em No-Limit contra um oponente. " +
+          'Responda só com a decisão pra vez atual, descrita em "situacao". ' +
+          'Quando a ação for "bet" ou "raise", "amount" é o TOTAL da sua aposta depois da ' +
+          'ação (não é o incremento) e tem que estar entre totalMinimoParaBetOuRaise e ' +
+          'totalMaximoParaBetOuRaise. Nunca escolha uma ação fora de acoesLegaisAgora.',
+        messages: [{ role: 'user', content: JSON.stringify(situacao) }],
+        output_config: { format: zodOutputFormat(ActionDecisionSchema) },
+      },
+      { timeout: AI_TIMEOUT_MS }
+    );
+
+    const decision = response.parsed_output;
+    if (!decision || !isLegalDecision(decision, { canCheck, canRaise, minTotal, maxTotal, highest })) {
+      console.warn(`[${BOT_NAME}] IA sugeriu ação inválida ou vazia, caindo pra heurística.`, decision);
+      return false;
+    }
+
+    console.log(`[${BOT_NAME}] (IA) ${decision.reasoning}`);
+    send(decision.action, decision.amount);
+    return true;
+  } catch (err) {
+    console.warn(`[${BOT_NAME}] falha ao consultar a IA (${err.message}), caindo pra heurística.`);
+    return false;
+  }
+}
+
+function isLegalDecision(decision, { canCheck, canRaise, minTotal, maxTotal, highest }) {
+  if (decision.action === 'check' && !canCheck) return false;
+  if (decision.action === 'call' && canCheck) return false; // nada a pagar — teria que ser 'check'
+  if (decision.action === 'bet' || decision.action === 'raise') {
+    if (!canRaise) return false;
+    if (typeof decision.amount !== 'number') return false;
+    if (decision.amount <= highest) return false;
+    if (decision.amount < minTotal && decision.amount < maxTotal) return false; // abaixo do mínimo e não é all-in
+    if (decision.amount > maxTotal) return false;
+  }
+  return true;
 }
 
 function cardRankIndex(card) {

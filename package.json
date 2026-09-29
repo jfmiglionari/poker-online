@@ -6,16 +6,20 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
-    "bot": "node bot/bot.js"
+    "bot": "node bot/bot.js",
+    "bot:ai": "BOT_AI=1 node bot/bot.js \"Bot IA\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0",
+    "dotenv": "^18.0.4",
     "express": "^5.2.1",
     "pokersolver": "^2.1.4",
     "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3"
+    "socket.io-client": "^4.8.3",
+    "zod": "^4.6.5"
   }
 }
