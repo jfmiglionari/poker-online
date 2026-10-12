@@ -1,3 +1,11 @@
 node_modules/
 .env
 .DS_Store
+
+# Modelo do escritório (P9), 12/10/2026
+ESTADO.md
+briefings/
+dados/
+*.numbers
+*.xlsx
+*.csv
