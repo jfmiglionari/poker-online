@@ -37,3 +37,11 @@ Node.js, Express, Socket.io, `pokersolver` (avaliação de mãos), `@anthropic-a
 ## Documentação
 
 A especificação completa do jogo — regras de aposta, fluxo de uma mão, casos de borda (desconexão, all-in, rebuy) — está em [`GAME_SPEC.md`](./GAME_SPEC.md).
+
+A documentação do projeto fica em `docs/`:
+- [`Objetivo e concepção`](./docs/Objetivo%20e%20concepção.md)
+- [`Arquitetura`](./docs/Arquitetura.md)
+- [`Modelo de dados`](./docs/Modelo%20de%20dados.md)
+- [`Como rodar e publicar`](./docs/Como%20rodar%20e%20publicar.md)
+- [`Decisões`](./docs/Decisões.md)
+- [`Histórico`](./docs/Histórico.md)
